@@ -1,0 +1,135 @@
+# Definir variables
+:local botToken "TOKEN TELEGRAM"
+:local chatID "CHAT-ID"
+
+# Obtener actualizaciones desde Telegram API con offset -1
+:local url "https://api.telegram.org/bot$botToken/getUpdates?offset=-1"
+:local result [/tool fetch url=$url as-value output=user]
+
+# Verificar si el fetch fue exitoso
+:if ($result->"status" = "finished") do={
+    :local json ($result->"data")
+    :local jsonString [:tostr $json]
+    
+    # Buscar la posición del array 'result' en el JSON
+    :local resultPos [:find $jsonString "\"result\":[{"]
+    :if ($resultPos != -1) do={
+        # Extraer el array 'result' completo
+        :local resultArray [:pick $jsonString ($resultPos + 9) [:len $jsonString]]
+        
+        # Buscar la posición de "update_id": en el JSON
+        :local updateIdPos [:find $resultArray "\"update_id\":"]
+        :if ($updateIdPos != -1) do={
+            # Buscar la posición de la coma que sigue al update_id
+            :local updateIdEndPos [:find $resultArray "," ($updateIdPos + 12)]
+            :if ($updateIdEndPos = -1) do={
+                :local updateIdEndPos [:find $resultArray "}" ($updateIdPos + 12)]
+            }
+            
+            # Extraer el valor del update_id
+            :local updateIdValue [:pick $resultArray ($updateIdPos + 12) $updateIdEndPos]
+            
+            # Verificar si el update_id ya existe en la address-list
+            :local existingUpdateId [/ip firewall address-list find list="UpdateIDs" where address=$updateIdValue]
+            :if ([:len $existingUpdateId] = 0) do={
+                # Si no existe, actualizar la address-list con el nuevo update_id
+                /ip firewall address-list add list="UpdateIDs" address=$updateIdValue comment="Telegram update_id"
+                
+                # Buscar el texto del mensaje
+                :local lastUpdateTextPos [:find $resultArray "\"text\":\""]
+                :if ($lastUpdateTextPos != -1) do={
+                    :local lastUpdateTextEndPos [:find $resultArray "\",\"" ($lastUpdateTextPos + 8)]
+                    :local lastUpdateTextMessage [:pick $resultArray ($lastUpdateTextPos + 8) $lastUpdateTextEndPos]
+                    
+                    # Verificar si el mensaje contiene el comando /getuser
+                    :if ([:find $lastUpdateTextMessage "/getuser"] = 0) do={
+                        :local userCommand [:pick $lastUpdateTextMessage 9 [:len $lastUpdateTextMessage]]
+                        
+                        # Si el comando es solo /getuser (sin nombre de usuario), listar usuarios activos
+                        :if ([:len $userCommand] = 0) do={
+                            # Obtener todos los usuarios activos
+                            :local activeUsers [/ip hotspot active print as-value]
+                            
+                            # Si hay usuarios activos
+                            :if ([:len $activeUsers] > 0) do={
+                                :local message "[Usuarios Activos]%0A"
+                                
+                                :foreach user in=$activeUsers do={
+                                    :local userName ($user->"user")
+                                    :local userIP ($user->"address")
+                                    
+                                    :set message ($message . "%09Usuario: $userName%0A%09IP: $userIP%0A")
+                                }
+                                
+                                # Enviar mensaje con la lista de usuarios activos
+                                :local url ("https://api.telegram.org/bot$botToken/sendMessage?chat_id=$chatID&text=" . $message)
+                                /tool fetch url=$url keep-result=no
+                            } else={
+                                # Si no hay usuarios activos
+                                :local message "[Usuarios Activos]%0ANo hay usuarios activos en este momento."
+                                :local url ("https://api.telegram.org/bot$botToken/sendMessage?chat_id=$chatID&text=" . $message)
+                                /tool fetch url=$url keep-result=no
+                            }
+                        } else={
+                            # Buscar al usuario en la lista del Hotspot
+                            :local userInfo [/ip hotspot user find name=$userCommand]
+                            
+                            # Verificar si el usuario existe en el Hotspot
+                            :if ([:len $userInfo] > 0) do={
+                                :local userID $userInfo
+                                :local userProfile [/ip hotspot user get $userID profile]
+                                :local userLimitUptime [/ip hotspot user get $userID limit-uptime]
+                                :local userUptimeUsed [/ip hotspot user get $userID uptime]
+                                
+                                # Verificar si el usuario está conectado
+                                :local userActiveInfo [/ip hotspot active find user=$userCommand]
+                                
+                                :if ([:len $userActiveInfo] > 0) do={
+                                    :local userActiveID $userActiveInfo
+                                    :local userIP [/ip hotspot active get $userActiveID address]
+                                    
+                                    # Buscar detalles del usuario desde el servidor DHCP usando la IP
+                                    :local dhcpLease [/ip dhcp-server lease find address=$userIP]
+                                    
+                                    :if ([:len $dhcpLease] > 0) do={
+                                        :local dhcpID $dhcpLease
+                                        :local userMAC [/ip dhcp-server lease get $dhcpID mac-address]
+                                        :local userName [/ip dhcp-server lease get $dhcpID host-name]
+                                        
+                                        # Crear mensaje
+                                        :local message ("[Login: " . [/system clock get time] . "]%0A%09%09Usuario: $userCommand%0A%09%09Perfil: $userProfile%0A%09%09Limit: $userLimitUptime%0A%09%09Ip Address: $userIP%0A%09%09Mac address: $userMAC%0A%09%09Dispositivo: $userName%0A%09%09Tiempo Usado: $userUptimeUsed")
+                                        
+                                        # Enviar el mensaje a Telegram
+                                        :local url ("https://api.telegram.org/bot$botToken/sendMessage?chat_id=$chatID&text=" . $message)
+                                        /tool fetch url=$url keep-result=no
+                                    } else={
+                                        # Si no hay detalles en DHCP
+                                        :local message ("[Login: " . [/system clock get time] . "]%0A%09%09Usuario: $userCommand%0A%09%09Perfil: $userProfile%0A%09%09Limit: $userLimitUptime%0A%09%09Ip Address: $userIP%0A%09%09Mac address: no disponible%0A%09%09Dispositivo: no disponible%0A%09%09Tiempo Usado: $userUptimeUsed")
+                                        
+                                        # Enviar el mensaje a Telegram
+                                        :local url ("https://api.telegram.org/bot$botToken/sendMessage?chat_id=$chatID&text=" . $message)
+                                        /tool fetch url=$url keep-result=no
+                                    }
+                                } else={
+                                    # Si el usuario no está conectado
+                                    :local message ("[Login: " . [/system clock get time] . "]%0A%09%09Usuario: $userCommand%0A%09%09Perfil: $userProfile%0A%09%09Limit: $userLimitUptime%0A%09%09Ip Address: no disponible%0A%09%09Mac address: no disponible%0A%09%09Dispositivo: no disponible%0A%09%09Tiempo Usado: $userUptimeUsed")
+                                    
+                                    # Enviar el mensaje a Telegram
+                                    :local url ("https://api.telegram.org/bot$botToken/sendMessage?chat_id=$chatID&text=" . $message)
+                                    /tool fetch url=$url keep-result=no
+                                }
+                            } else={
+                                # Si el usuario no existe en el Hotspot
+                                :local message ("[Login: " . [/system clock get time] . "]%0A%09%09Usuario: $userCommand%0A%09%09Perfil: no disponible%0A%09%09Limit: no disponible%0A%09%09Ip Address: no disponible%0A%09%09Mac address: no disponible%0A%09%09Dispositivo: no disponible%0A%09%09Tiempo Usado: no disponible")
+                                
+                                # Enviar el mensaje a Telegram
+                                :local url ("https://api.telegram.org/bot$botToken/sendMessage?chat_id=$chatID&text=" . $message)
+                                /tool fetch url=$url keep-result=no
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
